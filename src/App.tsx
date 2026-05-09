@@ -31,12 +31,44 @@ interface TaskCardProps {
   isX2Server: boolean;
 }
 
-// --- Cloud Storage Helper (Promises with explicit types) ---
+// --- Enhanced Cloud Storage Helper ---
+const isCloudSupported = tgApp?.isVersionAtLeast?.('6.9');
+
 const cloud = {
-  set: (key: string, value: any) => new Promise((res) => tgApp.CloudStorage.setItem(key, JSON.stringify(value), () => res(true))),
-  get: (key: string) => new Promise<any>((res) => tgApp.CloudStorage.getItem(key, (_: any, v: string) => { try { res(v ? JSON.parse(v) : null); } catch { res(null); } })),
-  getKeys: () => new Promise<string[]>((res) => tgApp.CloudStorage.getKeys((_: any, k: string[]) => res(k || []))),
-  remove: (keys: string[]) => new Promise((res) => tgApp.CloudStorage.removeItems(keys, () => res(true)))
+  set: (key: string, value: any) => new Promise((res) => {
+    const val = JSON.stringify(value);
+    if (isCloudSupported) {
+      tgApp.CloudStorage.setItem(key, val, () => res(true));
+    } else {
+      localStorage.setItem(key, val);
+      res(true);
+    }
+  }),
+  get: (key: string) => new Promise<any>((res) => {
+    if (isCloudSupported) {
+      tgApp.CloudStorage.getItem(key, (_: any, v: string) => {
+        try { res(v ? JSON.parse(v) : null); } catch { res(null); }
+      });
+    } else {
+      const v = localStorage.getItem(key);
+      try { res(v ? JSON.parse(v) : null); } catch { res(null); }
+    }
+  }),
+  getKeys: () => new Promise<string[]>((res) => {
+    if (isCloudSupported) {
+      tgApp.CloudStorage.getKeys((_: any, k: string[]) => res(k || []));
+    } else {
+      res(Object.keys(localStorage));
+    }
+  }),
+  remove: (keys: string[]) => new Promise((res) => {
+    if (isCloudSupported) {
+      tgApp.CloudStorage.removeItems(keys, () => res(true));
+    } else {
+      keys.forEach(k => localStorage.removeItem(k));
+      res(true);
+    }
+  })
 };
 
 export const triggerHaptic = (type: 'click' | 'tick' | 'success') => {
@@ -60,6 +92,7 @@ const getCurrentGameDay = (): string => {
 
 function App() {
   const [isLoading, setIsLoading] = useState(true);
+  const [isSyncing, setIsSyncing] = useState(false);
   const [gameDay, setGameDay] = useState<string>(getCurrentGameDay());
   const [taskProgress, setTaskProgress] = useState<Record<number, number>>({});
   const [completedIds, setCompletedIds] = useState<Set<number>>(new Set());
@@ -67,6 +100,9 @@ function App() {
   const [history, setHistory] = useState<Record<string, DailyHistory>>({});
   const [hasVip, setHasVip] = useState(false);
   const [isX2Server, setIsX2Server] = useState(false);
+  
+  // Real-time synchronization state
+  const [lastLocalUpdate, setLastLocalUpdate] = useState<number>(0);
   
   const [isResetModalOpen, setIsResetModalOpen] = useState(false);
   const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false);
@@ -83,6 +119,7 @@ function App() {
   const pendingRef = useRef<HTMLDivElement>(null);
   const completedRef = useRef<HTMLDivElement>(null);
 
+  // --- Initial Data Load & Rolling Check ---
   useEffect(() => {
     async function init() {
       setIsLoading(true);
@@ -90,68 +127,88 @@ function App() {
         tgApp.ready();
         tgApp.expand();
       }
-
-      const currentDay = getCurrentGameDay();
-      const [p, l, d, v, x2, allKeys] = await Promise.all([
-        cloud.get('progress'), cloud.get('logs'), cloud.get('gameday'),
-        cloud.get('vip'), cloud.get('x2'), cloud.getKeys()
-      ]);
-
-      const initialVip = !!v;
-      const initialX2 = !!x2;
-      setHasVip(initialVip);
-      setIsX2Server(initialX2);
-
-      if (d && d !== currentDay) {
-        const prevProgress: Record<number, number> = p || {};
-        const prevLogs: TaskLog[] = l || [];
-        let finalBP = 0;
-        let cCount = 0;
-        
-        tasks.forEach(t => {
-          const val = prevProgress[t.id] || 0;
-          const isDone = t.type === 'progress' ? val >= t.max : val > 0;
-          if (isDone) {
-            cCount++;
-            let reward = initialVip ? t.vipBP : t.baseBP;
-            if (initialX2) reward *= 2;
-            finalBP += (t.type === 'repeatable' ? reward * val : reward);
-          }
-        });
-
-        await cloud.set(`hist_${d}`, { bp: finalBP, completedCount: cCount, logs: prevLogs });
-
-        const ninetyDaysAgo = new Date();
-        ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
-        const oldKeys = allKeys.filter(k => k.startsWith('hist_') && new Date(k.replace('hist_', '')) < ninetyDaysAgo);
-        if (oldKeys.length > 0) await cloud.remove(oldKeys);
-
-        setTaskProgress({}); setTodayLogs([]); setCompletedIds(new Set());
-        await Promise.all([cloud.set('progress', {}), cloud.set('logs', []), cloud.set('gameday', currentDay)]);
-      } else {
-        const loadedProgress: Record<number, number> = p || {};
-        setTaskProgress(loadedProgress);
-        setTodayLogs(l || []);
-        const ids = new Set<number>();
-        tasks.forEach(t => {
-          const val = loadedProgress[t.id] || 0;
-          if (t.type === 'progress' ? val >= t.max : val > 0) ids.add(t.id);
-        });
-        setCompletedIds(ids);
-      }
-
-      const hist: Record<string, DailyHistory> = {};
-      const histKeys = allKeys.filter(k => k.startsWith('hist_')).sort().reverse();
-      for (const k of histKeys) {
-        const data = await cloud.get(k);
-        if (data) hist[k.replace('hist_', '')] = data as DailyHistory;
-      }
-      setHistory(hist);
-      setGameDay(currentDay);
+      await refreshDataFromCloud();
       setIsLoading(false);
     }
     init();
   }, []);
+
+  // --- Real-time Polling Hook (every 5 seconds) ---
+  useEffect(() => {
+    if (isLoading) return;
+
+    const interval = setInterval(async () => {
+      // Check cloud timestamp to see if another device updated data
+      const cloudTS = await cloud.get('last_update_ts') || 0;
+      if (cloudTS > lastLocalUpdate) {
+        setIsSyncing(true);
+        await refreshDataFromCloud();
+        setIsSyncing(false);
+      }
+    }, 5000);
+
+    return () => clearInterval(interval);
+  }, [isLoading, lastLocalUpdate]);
+
+  const refreshDataFromCloud = async () => {
+    const currentDay = getCurrentGameDay();
+    const [p, l, d, v, x2, ts, allKeys] = await Promise.all([
+      cloud.get('progress'), cloud.get('logs'), cloud.get('gameday'),
+      cloud.get('vip'), cloud.get('x2'), cloud.get('last_update_ts'), cloud.getKeys()
+    ]);
+
+    setHasVip(!!v);
+    setIsX2Server(!!x2);
+    if (ts) setLastLocalUpdate(ts);
+
+    if (d && d !== currentDay) {
+      const prevProgress: Record<number, number> = p || {};
+      const prevLogs: TaskLog[] = l || [];
+      let finalBP = 0;
+      let cCount = 0;
+      
+      tasks.forEach(t => {
+        const val = prevProgress[t.id] || 0;
+        const isDone = t.type === 'progress' ? val >= t.max : val > 0;
+        if (isDone) {
+          cCount++;
+          let reward = !!v ? t.vipBP : t.baseBP;
+          if (!!x2) reward *= 2;
+          finalBP += (t.type === 'repeatable' ? reward * val : reward);
+        }
+      });
+
+      await cloud.set(`hist_${d}`, { bp: finalBP, completedCount: cCount, logs: prevLogs });
+      const ninetyDaysAgo = new Date();
+      ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
+      const oldKeys = allKeys.filter(k => k.startsWith('hist_') && new Date(k.replace('hist_', '')) < ninetyDaysAgo);
+      if (oldKeys.length > 0) await cloud.remove(oldKeys);
+
+      setTaskProgress({}); setTodayLogs([]); setCompletedIds(new Set());
+      const nowTs = Date.now();
+      setLastLocalUpdate(nowTs);
+      await Promise.all([cloud.set('progress', {}), cloud.set('logs', []), cloud.set('gameday', currentDay), cloud.set('last_update_ts', nowTs)]);
+    } else {
+      const loadedProgress: Record<number, number> = p || {};
+      setTaskProgress(loadedProgress);
+      setTodayLogs(l || []);
+      const ids = new Set<number>();
+      tasks.forEach(t => {
+        const val = loadedProgress[t.id] || 0;
+        if (t.type === 'progress' ? val >= t.max : val > 0) ids.add(t.id);
+      });
+      setCompletedIds(ids);
+    }
+
+    const hist: Record<string, DailyHistory> = {};
+    const histKeys = allKeys.filter(k => k.startsWith('hist_')).sort().reverse();
+    for (const k of histKeys) {
+      const data = await cloud.get(k);
+      if (data) hist[k.replace('hist_', '')] = data as DailyHistory;
+    }
+    setHistory(hist);
+    setGameDay(currentDay);
+  };
 
   const calculateTotalBP = () => {
     let total = 0;
@@ -168,7 +225,14 @@ function App() {
   };
 
   const sync = async (p: any, l: any) => {
-    await Promise.all([cloud.set('progress', p), cloud.set('logs', l), cloud.set('gameday', gameDay)]);
+    const nowTs = Date.now();
+    setLastLocalUpdate(nowTs);
+    await Promise.all([
+      cloud.set('progress', p), 
+      cloud.set('logs', l), 
+      cloud.set('gameday', gameDay),
+      cloud.set('last_update_ts', nowTs)
+    ]);
   };
 
   const logAction = (taskId: number | null, type: 'add' | 'remove' | 'reset', bp: number) => {
@@ -251,7 +315,7 @@ function App() {
   if (isLoading) return (
     <div className="min-h-screen bg-rpDark flex flex-col items-center justify-center text-orange-400 font-bold gap-4">
       <RefreshCw className="animate-spin" size={32} />
-      <span>СИНХРОНИЗАЦИЯ...</span>
+      <span>ЗАГРУЗКА...</span>
     </div>
   );
 
@@ -261,19 +325,19 @@ function App() {
         <div className="flex justify-between items-center mb-3">
           <h1 className="text-xl font-bold text-transparent bg-clip-text bg-rp-gradient flex items-center gap-2">
             <Trophy size={20} className="text-yellow-400" />
-            BP Tracker <Cloud size={14} className="text-blue-400 opacity-50" />
+            BP Tracker <Cloud size={14} className={`${isSyncing ? 'text-blue-400 animate-bounce' : 'text-blue-400 opacity-50'}`} />
           </h1>
           <div className="flex items-center gap-3">
             <button onClick={() => { triggerHaptic('click'); setIsHistoryModalOpen(true); }} className="w-10 h-10 rounded-full bg-gray-800 flex items-center justify-center text-gray-400 border border-gray-700"><History size={18} /></button>
             <div className="text-right">
-              <div className="text-[10px] text-gray-400 font-semibold uppercase">Заработано</div>
-              <div className="text-2xl font-black text-white">{calculateTotalBP()} <span className="text-orange-400 text-sm">BP</span></div>
+              <div className="text-[10px] text-gray-400 font-semibold uppercase tracking-wider">Заработано</div>
+              <div className="text-2xl leading-none font-black text-white">{calculateTotalBP()} <span className="text-orange-400 text-sm">BP</span></div>
             </div>
           </div>
         </div>
         <div className="flex gap-2">
-          <button onClick={async () => { triggerHaptic('click'); const v = !hasVip; setHasVip(v); await cloud.set('vip', v); }} className={`flex-1 py-1.5 px-3 rounded-lg text-sm font-bold transition-all duration-300 ${hasVip ? 'bg-rp-gradient text-rpDark shadow-[0_0_10px_rgba(249,115,22,0.3)]' : 'bg-gray-800 text-gray-400'}`}><Star size={14} className="inline mr-1" /> VIP</button>
-          <button onClick={async () => { triggerHaptic('click'); const x = !isX2Server; setIsX2Server(x); await cloud.set('x2', x); }} className={`flex-1 py-1.5 px-3 rounded-lg text-sm font-bold transition-all duration-300 ${isX2Server ? 'bg-rp-gradient text-rpDark shadow-[0_0_10px_rgba(249,115,22,0.3)]' : 'bg-gray-800 text-gray-400'}`}><Zap size={14} className="inline mr-1" /> Сервер x2</button>
+          <button onClick={async () => { triggerHaptic('click'); const v = !hasVip; setHasVip(v); await cloud.set('vip', v); await cloud.set('last_update_ts', Date.now()); setLastLocalUpdate(Date.now()); }} className={`flex-1 py-1.5 px-3 rounded-lg text-sm font-bold transition-all duration-300 ${hasVip ? 'bg-rp-gradient text-rpDark shadow-[0_0_10px_rgba(249,115,22,0.3)]' : 'bg-gray-800 text-gray-400'}`}><Star size={14} className="inline mr-1" /> VIP</button>
+          <button onClick={async () => { triggerHaptic('click'); const x = !isX2Server; setIsX2Server(x); await cloud.set('x2', x); await cloud.set('last_update_ts', Date.now()); setLastLocalUpdate(Date.now()); }} className={`flex-1 py-1.5 px-3 rounded-lg text-sm font-bold transition-all duration-300 ${isX2Server ? 'bg-rp-gradient text-rpDark shadow-[0_0_10px_rgba(249,115,22,0.3)]' : 'bg-gray-800 text-gray-400'}`}><Zap size={14} className="inline mr-1" /> Сервер x2</button>
         </div>
       </div>
 
@@ -282,7 +346,7 @@ function App() {
           <div ref={recommendedRef} className="scroll-mt-36">
             <div className="flex justify-between items-center mb-3 px-1">
               <h2 className="text-sm font-bold uppercase tracking-widest text-orange-400 flex items-center gap-2"><Flame size={16} /> Рекомендуем</h2>
-              <button onClick={() => { triggerHaptic('click'); setRecommendationSeed(s => s + 1); }} className="text-gray-400 p-1.5 rounded-full bg-gray-800 transition-colors"><RefreshCw size={14} /></button>
+              <button onClick={() => { triggerHaptic('click'); setRecommendationSeed(s => s + 1); }} className="text-gray-400 hover:text-white p-1.5 rounded-full bg-gray-800 transition-colors"><RefreshCw size={14} /></button>
             </div>
             <div ref={recListRef} className="space-y-2">
               {recommendedTasks.map(t => <TaskCard key={`rec-${t.id}`} task={t} globalProgress={taskProgress[t.id] || 0} onProgressUpdate={updateProgress} onToggleStatus={toggleTaskStatus} hasVip={hasVip} isX2Server={isX2Server} />)}
@@ -305,7 +369,7 @@ function App() {
         )}
       </div>
 
-      <div className="fixed bottom-0 left-0 right-0 bg-rpPanel border-t border-gray-800 flex justify-around p-2 pb-safe z-50">
+      <div className="fixed bottom-0 left-0 right-0 bg-rpPanel border-t border-gray-800 flex justify-around p-2 pb-safe z-50 shadow-[0_-10px_20px_rgba(0,0,0,0.5)]">
         <button onClick={() => recommendedRef.current?.scrollIntoView({ behavior: 'smooth' })} className="flex flex-col items-center p-2 text-gray-400 active:text-orange-400"><Flame size={20} /><span className="text-[10px] mt-1">Топ</span></button>
         <button onClick={() => pendingRef.current?.scrollIntoView({ behavior: 'smooth' })} className="flex flex-col items-center p-2 text-gray-400 active:text-white"><ListTodo size={20} /><span className="text-[10px] mt-1">Задания</span></button>
         <button onClick={() => completedRef.current?.scrollIntoView({ behavior: 'smooth' })} className="flex flex-col items-center p-2 text-gray-400 active:text-green-500"><CheckCircle2 size={20} /><span className="text-[10px] mt-1">Готово</span></button>
@@ -322,7 +386,7 @@ function App() {
           <div className="flex-1 overflow-y-auto p-4 pb-32" ref={historyListRef}>
             {Object.keys({ [gameDay]: { logs: todayLogs, bp: calculateTotalBP() }, ...history }).map((dateStr, idx) => {
               const isToday = dateStr === gameDay;
-              const dayData = isToday ? { bp: calculateTotalBP(), logs: todayLogs } : history[dateStr];
+              const dayData = isToday ? { bp: calculateTotalBP(), logs: todayLogs, completedCount: completedTasks.length } : history[dateStr];
               const hasActivity = dayData && dayData.logs.length > 0;
               const isExpanded = expandedHistoryDay === dateStr;
               return (
