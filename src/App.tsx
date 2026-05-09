@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import WebApp from '@twa-dev/sdk';
-import { Check, Minus, Trophy, Star, Zap, Trash2, ListTodo, CheckCircle2, Flame, History, X, RefreshCw, ChevronDown, ChevronUp, Cloud } from 'lucide-react';
+import { Check, Minus, Trophy, Star, Zap, Trash2, ListTodo, CheckCircle2, Flame, History, X, RefreshCw, ChevronDown, ChevronUp, Cloud, Search, ArrowUpDown } from 'lucide-react';
 import { useAutoAnimate } from '@formkit/auto-animate/react';
 import { tasks } from './data';
 import type { Task } from './data';
@@ -101,8 +101,10 @@ function App() {
   const [hasVip, setHasVip] = useState(false);
   const [isX2Server, setIsX2Server] = useState(false);
   
-  // Real-time synchronization state
+  // Real-time synchronization & Search/Sort states
   const [lastLocalUpdate, setLastLocalUpdate] = useState<number>(0);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [sortBy, setSortBy] = useState<'default' | 'high' | 'low'>('default');
   
   const [isResetModalOpen, setIsResetModalOpen] = useState(false);
   const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false);
@@ -119,7 +121,6 @@ function App() {
   const pendingRef = useRef<HTMLDivElement>(null);
   const completedRef = useRef<HTMLDivElement>(null);
 
-  // --- Initial Data Load & Rolling Check ---
   useEffect(() => {
     async function init() {
       setIsLoading(true);
@@ -133,12 +134,9 @@ function App() {
     init();
   }, []);
 
-  // --- Real-time Polling Hook (every 5 seconds) ---
   useEffect(() => {
     if (isLoading) return;
-
     const interval = setInterval(async () => {
-      // Check cloud timestamp to see if another device updated data
       const cloudTS = await cloud.get('last_update_ts') || 0;
       if (cloudTS > lastLocalUpdate) {
         setIsSyncing(true);
@@ -146,7 +144,6 @@ function App() {
         setIsSyncing(false);
       }
     }, 5000);
-
     return () => clearInterval(interval);
   }, [isLoading, lastLocalUpdate]);
 
@@ -157,8 +154,10 @@ function App() {
       cloud.get('vip'), cloud.get('x2'), cloud.get('last_update_ts'), cloud.getKeys()
     ]);
 
-    setHasVip(!!v);
-    setIsX2Server(!!x2);
+    const initialVip = !!v;
+    const initialX2 = !!x2;
+    setHasVip(initialVip);
+    setIsX2Server(initialX2);
     if (ts) setLastLocalUpdate(ts);
 
     if (d && d !== currentDay) {
@@ -172,8 +171,8 @@ function App() {
         const isDone = t.type === 'progress' ? val >= t.max : val > 0;
         if (isDone) {
           cCount++;
-          let reward = !!v ? t.vipBP : t.baseBP;
-          if (!!x2) reward *= 2;
+          let reward = initialVip ? t.vipBP : t.baseBP;
+          if (initialX2) reward *= 2;
           finalBP += (t.type === 'repeatable' ? reward * val : reward);
         }
       });
@@ -293,6 +292,20 @@ function App() {
     setIsResetModalOpen(false);
   };
 
+  // --- Filtering & Sorting Logic ---
+  const processTasks = (taskList: Task[]) => {
+    let filtered = taskList.filter(t => 
+      t.title.toLowerCase().includes(searchQuery.toLowerCase())
+    );
+
+    if (sortBy === 'high') {
+      filtered.sort((a, b) => (hasVip ? b.vipBP : b.baseBP) - (hasVip ? a.vipBP : a.baseBP));
+    } else if (sortBy === 'low') {
+      filtered.sort((a, b) => (hasVip ? a.vipBP : a.baseBP) - (hasVip ? b.vipBP : b.baseBP));
+    }
+    return filtered;
+  };
+
   const { pendingTasks, completedTasks } = useMemo(() => {
     const pending: Task[] = [];
     const completed: Task[] = [];
@@ -300,8 +313,11 @@ function App() {
       if (completedIds.has(task.id)) completed.push(task);
       else pending.push(task);
     });
-    return { pendingTasks: pending, completedTasks: completed };
-  }, [completedIds]);
+    return { 
+      pendingTasks: processTasks(pending), 
+      completedTasks: processTasks(completed) 
+    };
+  }, [completedIds, searchQuery, sortBy, hasVip]);
 
   const recommendedTasks = useMemo(() => {
     const activeCategories = new Set<string>();
@@ -321,6 +337,7 @@ function App() {
 
   return (
     <div className="min-h-screen bg-rpDark pb-24 font-sans select-none">
+      {/* FIXED HEADER */}
       <div className="fixed top-0 left-0 right-0 z-40 bg-rpDark/85 backdrop-blur-xl border-b border-gray-800 p-4 shadow-xl">
         <div className="flex justify-between items-center mb-3">
           <h1 className="text-xl font-bold text-transparent bg-clip-text bg-rp-gradient flex items-center gap-2">
@@ -328,47 +345,84 @@ function App() {
             BP Tracker <Cloud size={14} className={`${isSyncing ? 'text-blue-400 animate-bounce' : 'text-blue-400 opacity-50'}`} />
           </h1>
           <div className="flex items-center gap-3">
-            <button onClick={() => { triggerHaptic('click'); setIsHistoryModalOpen(true); }} className="w-10 h-10 rounded-full bg-gray-800 flex items-center justify-center text-gray-400 border border-gray-700"><History size={18} /></button>
+            <button onClick={() => { triggerHaptic('click'); setIsHistoryModalOpen(true); }} className="w-10 h-10 rounded-full bg-gray-800 flex items-center justify-center text-gray-400 border border-gray-700 active:scale-90 transition-transform"><History size={18} /></button>
             <div className="text-right">
               <div className="text-[10px] text-gray-400 font-semibold uppercase tracking-wider">Заработано</div>
               <div className="text-2xl leading-none font-black text-white">{calculateTotalBP()} <span className="text-orange-400 text-sm">BP</span></div>
             </div>
           </div>
         </div>
-        <div className="flex gap-2">
+
+        <div className="flex gap-2 mb-3">
           <button onClick={async () => { triggerHaptic('click'); const v = !hasVip; setHasVip(v); await cloud.set('vip', v); await cloud.set('last_update_ts', Date.now()); setLastLocalUpdate(Date.now()); }} className={`flex-1 py-1.5 px-3 rounded-lg text-sm font-bold transition-all duration-300 ${hasVip ? 'bg-rp-gradient text-rpDark shadow-[0_0_10px_rgba(249,115,22,0.3)]' : 'bg-gray-800 text-gray-400'}`}><Star size={14} className="inline mr-1" /> VIP</button>
           <button onClick={async () => { triggerHaptic('click'); const x = !isX2Server; setIsX2Server(x); await cloud.set('x2', x); await cloud.set('last_update_ts', Date.now()); setLastLocalUpdate(Date.now()); }} className={`flex-1 py-1.5 px-3 rounded-lg text-sm font-bold transition-all duration-300 ${isX2Server ? 'bg-rp-gradient text-rpDark shadow-[0_0_10px_rgba(249,115,22,0.3)]' : 'bg-gray-800 text-gray-400'}`}><Zap size={14} className="inline mr-1" /> Сервер x2</button>
         </div>
+
+        {/* SEARCH & SORT BAR */}
+        <div className="flex gap-2">
+          <div className="relative flex-1">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" size={16} />
+            <input 
+              type="text" 
+              placeholder="Поиск заданий..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-full bg-gray-900 border border-gray-800 rounded-lg py-2 pl-10 pr-4 text-sm text-white placeholder:text-gray-600 focus:outline-none focus:border-orange-500/50 transition-colors"
+            />
+            {searchQuery && (
+              <button onClick={() => setSearchQuery('')} className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-gray-500 hover:text-white">
+                <X size={14} />
+              </button>
+            )}
+          </div>
+          <button 
+            onClick={() => {
+              triggerHaptic('click');
+              setSortBy(prev => prev === 'default' ? 'high' : prev === 'high' ? 'low' : 'default');
+            }}
+            className={`px-3 rounded-lg border flex items-center gap-2 text-xs font-bold transition-all ${sortBy !== 'default' ? 'bg-orange-500/10 border-orange-500/50 text-orange-400' : 'bg-gray-900 border-gray-800 text-gray-400'}`}
+          >
+            <ArrowUpDown size={14} />
+            {sortBy === 'high' ? 'Много BP' : sortBy === 'low' ? 'Мало BP' : 'Сорт.'}
+          </button>
+        </div>
       </div>
 
-      <div className="p-4 pt-36 space-y-8">
-        {recommendedTasks.length > 0 && (
-          <div ref={recommendedRef} className="scroll-mt-36">
+      <div className="p-4 pt-48 space-y-8">
+        {recommendedTasks.length > 0 && !searchQuery && (
+          <div ref={recommendedRef} className="scroll-mt-48">
             <div className="flex justify-between items-center mb-3 px-1">
               <h2 className="text-sm font-bold uppercase tracking-widest text-orange-400 flex items-center gap-2"><Flame size={16} /> Рекомендуем</h2>
-              <button onClick={() => { triggerHaptic('click'); setRecommendationSeed(s => s + 1); }} className="text-gray-400 hover:text-white p-1.5 rounded-full bg-gray-800 transition-colors"><RefreshCw size={14} /></button>
+              <button onClick={() => { triggerHaptic('click'); setRecommendationSeed(s => s + 1); }} className="text-gray-400 p-1.5 rounded-full bg-gray-800 active:scale-90 transition-transform"><RefreshCw size={14} /></button>
             </div>
             <div ref={recListRef} className="space-y-2">
               {recommendedTasks.map(t => <TaskCard key={`rec-${t.id}`} task={t} globalProgress={taskProgress[t.id] || 0} onProgressUpdate={updateProgress} onToggleStatus={toggleTaskStatus} hasVip={hasVip} isX2Server={isX2Server} />)}
             </div>
           </div>
         )}
-        <div ref={pendingRef} className="scroll-mt-36">
-          <h2 className="text-sm font-bold uppercase mb-3 text-white flex items-center gap-2 px-1"><ListTodo size={16} className="text-gray-400" /> Текущие ({pendingTasks.length})</h2>
+        <div ref={pendingRef} className="scroll-mt-48">
+          <h2 className="text-sm font-bold uppercase mb-3 text-white flex items-center gap-2 px-1"><ListTodo size={16} className="text-gray-400" /> {searchQuery ? 'Результаты поиска' : 'Текущие'} ({pendingTasks.length})</h2>
           <div ref={pendingListRef} className="space-y-2">
             {pendingTasks.map(t => <TaskCard key={t.id} task={t} globalProgress={taskProgress[t.id] || 0} onProgressUpdate={updateProgress} onToggleStatus={toggleTaskStatus} hasVip={hasVip} isX2Server={isX2Server} />)}
           </div>
         </div>
         {completedTasks.length > 0 && (
-          <div ref={completedRef} className="scroll-mt-36">
+          <div ref={completedRef} className="scroll-mt-48">
             <h2 className="text-sm font-bold uppercase mb-3 text-green-500 flex items-center gap-2 px-1"><CheckCircle2 size={16} /> Выполнено ({completedTasks.length})</h2>
             <div ref={completedListRef} className="space-y-2 opacity-75">
               {completedTasks.map(t => <TaskCard key={t.id} task={t} globalProgress={taskProgress[t.id] || 0} onProgressUpdate={updateProgress} onToggleStatus={toggleTaskStatus} hasVip={hasVip} isX2Server={isX2Server} />)}
             </div>
           </div>
         )}
+        {pendingTasks.length === 0 && completedTasks.length === 0 && (
+          <div className="text-center py-20">
+            <Search className="mx-auto text-gray-800 mb-4" size={48} />
+            <p className="text-gray-500 font-medium">Ничего не найдено...</p>
+          </div>
+        )}
       </div>
 
+      {/* FOOTER & MODALS stay the same as previous stable version */}
       <div className="fixed bottom-0 left-0 right-0 bg-rpPanel border-t border-gray-800 flex justify-around p-2 pb-safe z-50 shadow-[0_-10px_20px_rgba(0,0,0,0.5)]">
         <button onClick={() => recommendedRef.current?.scrollIntoView({ behavior: 'smooth' })} className="flex flex-col items-center p-2 text-gray-400 active:text-orange-400"><Flame size={20} /><span className="text-[10px] mt-1">Топ</span></button>
         <button onClick={() => pendingRef.current?.scrollIntoView({ behavior: 'smooth' })} className="flex flex-col items-center p-2 text-gray-400 active:text-white"><ListTodo size={20} /><span className="text-[10px] mt-1">Задания</span></button>
@@ -415,7 +469,7 @@ function App() {
 
       {isResetModalOpen && (
         <div className="fixed inset-0 z-[110] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-rpPanel border border-gray-800 rounded-2xl p-6 w-full max-w-sm">
+          <div className="bg-rpPanel border border-gray-800 rounded-2xl p-6 w-full max-w-sm shadow-2xl">
             <h3 className="text-xl font-bold text-white mb-2">Сбросить всё?</h3>
             <div className="flex gap-3 mt-6">
               <button onClick={() => setIsResetModalOpen(false)} className="flex-1 py-3 rounded-xl bg-gray-800 text-white font-bold">Отмена</button>
