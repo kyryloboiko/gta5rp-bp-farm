@@ -113,10 +113,7 @@ function App() {
   useEffect(() => {
     async function init() {
       setIsLoading(true);
-      if (tgApp && typeof tgApp.ready === 'function') {
-        tgApp.ready();
-        tgApp.expand();
-      }
+      if (tgApp && typeof tgApp.ready === 'function') { tgApp.ready(); tgApp.expand(); }
       await refreshDataFromCloud();
       setIsLoading(false);
     }
@@ -154,7 +151,6 @@ function App() {
       const prevLogs: TaskLog[] = l || [];
       let finalBP = 0;
       let cCount = 0;
-      
       tasks.forEach(t => {
         const val = prevProgress[t.id] || 0;
         const isDone = t.type === 'progress' ? val >= t.max : val > 0;
@@ -165,7 +161,6 @@ function App() {
           finalBP += (t.type === 'repeatable' ? reward * val : reward);
         }
       });
-
       await cloud.set(`hist_${d}`, { bp: finalBP, completedCount: cCount, logs: prevLogs });
       setTaskProgress({}); setTodayLogs([]); setCompletedIds(new Set());
       const nowTs = Date.now();
@@ -182,7 +177,6 @@ function App() {
       });
       setCompletedIds(ids);
     }
-
     const hist: Record<string, DailyHistory> = {};
     const histKeys = allKeys.filter(k => k.startsWith('hist_')).sort().reverse();
     for (const k of histKeys) {
@@ -210,42 +204,29 @@ function App() {
   const sync = async (p: any, l: any) => {
     const nowTs = Date.now();
     setLastLocalUpdate(nowTs);
-    await Promise.all([
-      cloud.set('progress', p), cloud.set('logs', l), 
-      cloud.set('gameday', gameDay), cloud.set('last_update_ts', nowTs)
-    ]);
+    await Promise.all([cloud.set('progress', p), cloud.set('logs', l), cloud.set('gameday', gameDay), cloud.set('last_update_ts', nowTs)]);
   };
 
   const updateProgress = async (taskId: number, amount: number, maxAmount: number) => {
     const currentVal = taskProgress[taskId] || 0;
     const nextVal = Math.max(0, Math.min(maxAmount, currentVal + amount));
     if (currentVal === nextVal) return;
-
     const task = tasks.find(t => t.id === taskId);
     if (!task) return;
-
     let reward = hasVip ? task.vipBP : task.baseBP;
     if (isX2Server) reward *= 2;
-
-    const newLog: TaskLog = {
-      id: Math.random().toString(36).substring(2, 9),
-      taskId, type: amount > 0 ? 'add' : 'remove', bp: task.type === 'repeatable' ? reward * Math.abs(amount) : reward, timestamp: Date.now()
-    };
-
+    const newLog: TaskLog = { id: Math.random().toString(36).substring(2, 9), taskId, type: amount > 0 ? 'add' : 'remove', bp: task.type === 'repeatable' ? reward * Math.abs(amount) : reward, timestamp: Date.now() };
     const isNowCompleted = task.type === 'progress' ? nextVal >= task.max : nextVal > 0;
     const wasCompleted = task.type === 'progress' ? currentVal >= task.max : currentVal > 0;
-
     if (isNowCompleted && !wasCompleted) {
       timeoutsRef.current[taskId] = setTimeout(() => setCompletedIds(prev => new Set(prev).add(taskId)), 400);
     } else if (!isNowCompleted && wasCompleted) {
       if (timeoutsRef.current[taskId]) clearTimeout(timeoutsRef.current[taskId]);
       setCompletedIds(prev => { const next = new Set(prev); next.delete(taskId); return next; });
     }
-
     const nextLogs = [...todayLogs, newLog];
     const nextProgress = { ...taskProgress, [taskId]: nextVal };
-    setTodayLogs(nextLogs);
-    setTaskProgress(nextProgress);
+    setTodayLogs(nextLogs); setTaskProgress(nextProgress);
     await sync(nextProgress, nextLogs);
   };
 
@@ -258,11 +239,8 @@ function App() {
     triggerHaptic('success', hapticsEnabled);
     const resetLog: TaskLog = { id: 'reset-' + Date.now(), taskId: null, type: 'reset', bp: 0, timestamp: Date.now() };
     const nextLogs = [...todayLogs, resetLog];
-    setTaskProgress({});
-    setCompletedIds(new Set());
-    setTodayLogs(nextLogs);
-    await sync({}, nextLogs);
-    setIsResetModalOpen(false);
+    setTaskProgress({}); setCompletedIds(new Set()); setTodayLogs(nextLogs);
+    await sync({}, nextLogs); setIsResetModalOpen(false);
   };
 
   const processTasks = (taskList: Task[]) => {
@@ -275,19 +253,21 @@ function App() {
   const { pendingTasks, completedTasks } = useMemo(() => {
     const pending: Task[] = [];
     const completed: Task[] = [];
-    tasks.forEach(task => {
-      if (completedIds.has(task.id)) completed.push(task);
-      else pending.push(task);
-    });
+    tasks.forEach(task => { if (completedIds.has(task.id)) completed.push(task); else pending.push(task); });
     return { pendingTasks: processTasks(pending), completedTasks: processTasks(completed) };
   }, [completedIds, searchQuery, sortBy, hasVip]);
 
   const recommendedTasks = useMemo(() => {
     const activeCategories = new Set<string>();
-    completedTasks.forEach(t => { if (t.category) activeCategories.add(t.category); });
+    completedTasks.forEach(t => activeCategories.add(t.category));
     let pool = [...pendingTasks].sort(() => Math.random() - 0.5);
     return [...pool.filter(t => activeCategories.has(t.category)), ...pool.filter(t => !activeCategories.has(t.category))].slice(0, 3);
   }, [pendingTasks, completedTasks, recommendationSeed]);
+
+  const scrollTo = (ref: React.RefObject<HTMLDivElement | null>) => {
+    triggerHaptic('click', hapticsEnabled);
+    ref.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
 
   if (isLoading) return (
     <div className="min-h-screen bg-rpDark flex flex-col items-center justify-center text-orange-400 font-bold gap-4">
@@ -298,17 +278,19 @@ function App() {
 
   return (
     <div className="min-h-screen bg-rpDark pb-24 font-sans select-none overflow-x-hidden">
+      {/* HEADER */}
       <div className="fixed top-0 left-0 right-0 z-40 bg-rpDark/85 backdrop-blur-xl border-b border-gray-800 p-4 shadow-xl">
         <div className="flex justify-between items-center mb-3">
           <h1 className="text-xl font-bold text-transparent bg-clip-text bg-rp-gradient flex items-center gap-2">
             <Trophy size={20} className="text-yellow-400" />
             BP Tracker <Cloud size={14} className={`${isSyncing ? 'text-blue-400 animate-bounce' : 'text-blue-400 opacity-50'}`} />
           </h1>
-          <div className="flex items-center gap-3">
-            <button onClick={() => { triggerHaptic('click', hapticsEnabled); setIsHistoryModalOpen(true); }} className="w-10 h-10 rounded-full bg-gray-800 flex items-center justify-center text-gray-400 border border-gray-700 active:scale-90 transition-transform"><History size={18} /></button>
-            <div className="text-right">
-              <div className="text-[10px] text-gray-400 font-semibold uppercase tracking-wider">Заработано</div>
-              <div className="text-2xl leading-none font-black text-white">{calculateTotalBP()} <span className="text-orange-400 text-sm">BP</span></div>
+          <div className="flex items-center gap-2">
+            <button onClick={() => { triggerHaptic('click', hapticsEnabled); setIsHistoryModalOpen(true); }} className="w-9 h-9 rounded-full bg-gray-800 flex items-center justify-center text-gray-400 border border-gray-700 active:scale-90 transition-transform"><History size={16} /></button>
+            <button onClick={() => { triggerHaptic('click', hapticsEnabled); setActiveTab(activeTab === 'tasks' ? 'settings' : 'tasks'); }} className={`w-9 h-9 rounded-full flex items-center justify-center border transition-all ${activeTab === 'settings' ? 'bg-orange-500 border-orange-400 text-rpDark' : 'bg-gray-800 border-gray-700 text-gray-400'}`}><Settings size={16} /></button>
+            <div className="text-right ml-1">
+              <div className="text-[10px] text-gray-400 font-semibold uppercase leading-none mb-1">Всего</div>
+              <div className="text-xl font-black text-white leading-none">{calculateTotalBP()} <span className="text-orange-400 text-xs">BP</span></div>
             </div>
           </div>
         </div>
@@ -331,7 +313,7 @@ function App() {
 
         {activeTab === 'settings' && (
           <div className="py-2 animate-in slide-in-from-right-4 duration-300">
-            <h2 className="text-sm font-bold text-gray-400 uppercase tracking-widest">Настройки</h2>
+            <h2 className="text-sm font-bold text-orange-400 uppercase tracking-widest">Настройки приложения</h2>
           </div>
         )}
       </div>
@@ -341,7 +323,7 @@ function App() {
         {activeTab === 'tasks' ? (
           <div className="space-y-8">
             {recommendedTasks.length > 0 && !searchQuery && (
-              <div ref={recommendedRef} className="scroll-mt-48">
+              <div ref={recommendedRef} className="scroll-mt-[190px]">
                 <div className="flex justify-between items-center mb-3 px-1">
                   <h2 className="text-sm font-bold uppercase tracking-widest text-orange-400 flex items-center gap-2"><Flame size={16} /> Рекомендуем</h2>
                   <button onClick={() => { triggerHaptic('click', hapticsEnabled); setRecommendationSeed(s => s + 1); }} className="text-gray-400 p-1.5 rounded-full bg-gray-800 active:scale-90 transition-transform"><RefreshCw size={14} /></button>
@@ -351,14 +333,14 @@ function App() {
                 </div>
               </div>
             )}
-            <div ref={pendingRef} className="scroll-mt-48">
+            <div ref={pendingRef} className="scroll-mt-[190px]">
               <h2 className="text-sm font-bold uppercase mb-3 text-white flex items-center gap-2 px-1"><ListTodo size={16} className="text-gray-400" /> {searchQuery ? 'Результаты' : 'Задания'} ({pendingTasks.length})</h2>
               <div className="space-y-2">
                 {pendingTasks.map(t => <TaskCard key={t.id} task={t} globalProgress={taskProgress[t.id] || 0} onProgressUpdate={updateProgress} onToggleStatus={toggleTaskStatus} hasVip={hasVip} isX2Server={isX2Server} hapticsEnabled={hapticsEnabled} />)}
               </div>
             </div>
             {completedTasks.length > 0 && (
-              <div ref={completedRef} className="scroll-mt-48">
+              <div ref={completedRef} className="scroll-mt-[190px]">
                 <h2 className="text-sm font-bold uppercase mb-3 text-green-500 flex items-center gap-2 px-1"><CheckCircle2 size={16} /> Выполнено ({completedTasks.length})</h2>
                 <div className="space-y-2 opacity-75 transition-opacity hover:opacity-100">
                   {completedTasks.map(t => <TaskCard key={t.id} task={t} globalProgress={taskProgress[t.id] || 0} onProgressUpdate={updateProgress} onToggleStatus={toggleTaskStatus} hasVip={hasVip} isX2Server={isX2Server} hapticsEnabled={hapticsEnabled} />)}
@@ -373,58 +355,39 @@ function App() {
                 <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${hapticsEnabled ? 'bg-orange-500/20 text-orange-400' : 'bg-gray-800 text-gray-500'}`}>
                   {hapticsEnabled ? <Bell size={20} /> : <BellOff size={20} />}
                 </div>
-                <div>
-                  <h3 className="font-bold text-white text-sm">Вибрация</h3>
-                  <p className="text-xs text-gray-500">Тактильный отклик при кликах</p>
-                </div>
+                <div><h3 className="font-bold text-white text-sm">Вибрация</h3><p className="text-xs text-gray-500">Тактильный отклик</p></div>
               </div>
-              <button 
-                onClick={async () => {
-                  const newState = !hapticsEnabled;
-                  setHapticsEnabled(newState);
-                  if (newState) triggerHaptic('click', true);
-                  await cloud.set('haptics', newState);
-                }}
-                className={`w-12 h-6 rounded-full transition-colors relative ${hapticsEnabled ? 'bg-orange-500' : 'bg-gray-700'}`}
-              >
-                <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${hapticsEnabled ? 'left-7' : 'left-1'}`} />
-              </button>
+              <button onClick={async () => { const s = !hapticsEnabled; setHapticsEnabled(s); if(s) triggerHaptic('click', true); await cloud.set('haptics', s); }} className={`w-12 h-6 rounded-full transition-colors relative ${hapticsEnabled ? 'bg-orange-500' : 'bg-gray-700'}`}><div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${hapticsEnabled ? 'left-7' : 'left-1'}`} /></button>
             </div>
-
             <div className="bg-rpPanel rounded-2xl p-4 border border-gray-800">
-              <h3 className="font-bold text-white text-sm mb-1">Опасная зона</h3>
-              <p className="text-xs text-gray-500 mb-4">Сброс обнулит текущий прогресс без сохранения в историю.</p>
-              <button 
-                onClick={() => { triggerHaptic('click', hapticsEnabled); setIsResetModalOpen(true); }}
-                className="w-full py-3 bg-red-500/10 border border-red-500/30 text-red-500 rounded-xl font-bold text-sm flex items-center justify-center gap-2 active:bg-red-500 active:text-white transition-all"
-              >
-                <Trash2 size={16} /> Сбросить прогресс дня
-              </button>
+              <h3 className="font-bold text-white text-sm mb-1">Сброс данных</h3>
+              <p className="text-xs text-gray-500 mb-4">Мгновенно обнуляет текущий день.</p>
+              <button onClick={() => { triggerHaptic('click', hapticsEnabled); setIsResetModalOpen(true); }} className="w-full py-3 bg-red-500/10 border border-red-500/30 text-red-500 rounded-xl font-bold text-sm flex items-center justify-center gap-2 active:bg-red-500 active:text-white transition-all"><Trash2 size={16} /> Сбросить прогресс дня</button>
             </div>
-
-            <div className="text-center space-y-1 pt-4">
-              <p className="text-[10px] text-gray-600 font-bold uppercase tracking-widest">GTA5RP BP Tracker v2.2</p>
-              <p className="text-[10px] text-gray-700 flex items-center justify-center gap-1">
-                <Cloud size={10} /> {isCloudSupported ? 'Cloud Storage Active' : 'Local Backup Active'}
-              </p>
+            <div className="text-center space-y-1 pt-4 opacity-30">
+              <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest">GTA5RP BP Tracker v2.5</p>
+              <p className="text-[10px] text-gray-500 flex items-center justify-center gap-1"><Cloud size={10} /> Cloud Sync Active</p>
             </div>
           </div>
         )}
       </div>
 
-      {/* FOOTER NAV */}
-      <div className="fixed bottom-0 left-0 right-0 bg-rpPanel border-t border-gray-800 flex justify-around p-2 pb-safe z-50 shadow-[0_-10px_20px_rgba(0,0,0,0.5)]">
-        <button onClick={() => { triggerHaptic('click', hapticsEnabled); setActiveTab('tasks'); }} className={`flex-1 flex flex-col items-center p-2 transition-colors ${activeTab === 'tasks' ? 'text-orange-400' : 'text-gray-500'}`}>
-          <ListTodo size={22} />
-          <span className="text-[10px] mt-1 font-bold">Задания</span>
-        </button>
-        <button onClick={() => { triggerHaptic('click', hapticsEnabled); setActiveTab('settings'); }} className={`flex-1 flex flex-col items-center p-2 transition-colors ${activeTab === 'settings' ? 'text-orange-400' : 'text-gray-500'}`}>
-          <Settings size={22} />
-          <span className="text-[10px] mt-1 font-bold">Настройки</span>
-        </button>
+      {/* FOOTER NAV (DYNAMIC) */}
+      <div className="fixed bottom-0 left-0 right-0 bg-rpPanel/90 backdrop-blur-lg border-t border-gray-800 flex justify-around p-2 pb-safe z-50 shadow-[0_-10px_20px_rgba(0,0,0,0.5)]">
+        {activeTab === 'tasks' ? (
+          <>
+            <button onClick={() => scrollTo(recommendedRef)} className="flex flex-col items-center p-2 text-gray-500 active:text-orange-400"><Flame size={20} /><span className="text-[10px] mt-1 font-bold">Топ</span></button>
+            <button onClick={() => scrollTo(pendingRef)} className="flex flex-col items-center p-2 text-gray-500 active:text-white"><ListTodo size={20} /><span className="text-[10px] mt-1 font-bold">Задания</span></button>
+            <button onClick={() => scrollTo(completedRef)} className="flex flex-col items-center p-2 text-gray-500 active:text-green-500"><CheckCircle2 size={20} /><span className="text-[10px] mt-1 font-bold">Готово</span></button>
+            <div className="w-px h-8 bg-gray-700 self-center" />
+            <button onClick={() => { triggerHaptic('click', hapticsEnabled); setActiveTab('settings'); }} className="flex flex-col items-center p-2 text-gray-500"><Settings size={20} /><span className="text-[10px] mt-1 font-bold">Настройки</span></button>
+          </>
+        ) : (
+          <button onClick={() => { triggerHaptic('click', hapticsEnabled); setActiveTab('tasks'); }} className="flex items-center gap-2 py-2 px-6 bg-orange-500 rounded-xl text-rpDark font-black uppercase text-sm active:scale-95 transition-transform"><ListTodo size={18} /> Вернуться к заданиям</button>
+        )}
       </div>
 
-      {/* MODALS */}
+      {/* HISTORY & RESET MODALS (stay same as stable) */}
       {isHistoryModalOpen && (
         <div className="fixed inset-0 z-[100] bg-rpDark flex flex-col overflow-hidden animate-in slide-in-from-bottom-full duration-300">
           <div className="p-4 bg-rpPanel border-b border-gray-800 flex justify-between items-center shrink-0 pt-safe">
@@ -465,7 +428,7 @@ function App() {
         <div className="fixed inset-0 z-[110] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-rpPanel border border-gray-800 rounded-2xl p-6 w-full max-w-sm">
             <h3 className="text-xl font-bold text-white mb-2">Сбросить всё?</h3>
-            <p className="text-xs text-gray-400 mb-6">Это действие обнулит текущий день. Оно будет записано в историю як сброс.</p>
+            <p className="text-xs text-gray-400 mb-6">Это действие обнулит текущий день. Оно будет записано в историю как сброс.</p>
             <div className="flex gap-3 mt-6">
               <button onClick={() => setIsResetModalOpen(false)} className="flex-1 py-3 rounded-xl bg-gray-800 text-white font-bold">Отмена</button>
               <button onClick={resetAllProgress} className="flex-1 py-3 rounded-xl bg-red-500/20 text-red-500 border border-red-500/50 font-bold">Да, сбросить</button>
@@ -482,22 +445,17 @@ function TaskCard({ task, globalProgress, onProgressUpdate, onToggleStatus, hasV
   const [isDragging, setIsDragging] = useState(false);
   const displayProgress = isDragging ? localProgress : globalProgress;
   const isFinishedGlobal = task.type === 'progress' ? globalProgress >= task.max : globalProgress > 0;
-
   useEffect(() => { if (!isDragging) setLocalProgress(globalProgress); }, [globalProgress, isDragging]);
-
   let dynamicReward = hasVip ? task.vipBP : task.baseBP;
   if (isX2Server) dynamicReward *= 2;
   const progressPercent = task.type === 'progress' ? Math.min(100, (displayProgress / task.max) * 100) : (isFinishedGlobal ? 100 : 0);
-
   const dragStartX = useRef<number | null>(null);
   const startProgress = useRef<number>(0);
   const isDragMove = useRef<boolean>(false);
-
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     dragStartX.current = e.clientX; startProgress.current = displayProgress;
     isDragMove.current = false; e.currentTarget.setPointerCapture(e.pointerId);
   };
-
   const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
     if (dragStartX.current === null || task.type === 'boolean') return;
     const deltaX = e.clientX - dragStartX.current;
@@ -509,7 +467,6 @@ function TaskCard({ task, globalProgress, onProgressUpdate, onToggleStatus, hasV
       if (newProgress !== localProgress) { setLocalProgress(newProgress); triggerHaptic('tick', hapticsEnabled); }
     }
   };
-
   const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
     if (dragStartX.current === null) return;
     dragStartX.current = null; e.currentTarget.releasePointerCapture(e.pointerId);
@@ -525,7 +482,6 @@ function TaskCard({ task, globalProgress, onProgressUpdate, onToggleStatus, hasV
       else onProgressUpdate(task.id, 1, task.type === 'repeatable' ? 999 : task.max);
     }
   };
-
   return (
     <div onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} className={`relative overflow-hidden bg-rpPanel rounded-xl border cursor-pointer touch-pan-y transition-all duration-300 active:scale-[0.98] ${isFinishedGlobal && task.type !== 'repeatable' ? 'border-orange-500/50 bg-orange-500/10 shadow-[0_0_15px_rgba(249,115,22,0.1)]' : 'border-gray-800'}`}>
       {(task.type === 'progress' || task.type === 'repeatable') && displayProgress > 0 && (
