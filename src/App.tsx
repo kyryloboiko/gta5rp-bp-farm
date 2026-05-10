@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import WebApp from '@twa-dev/sdk';
-import { Check, Minus, Trophy, Star, Zap, Trash2, ListTodo, CheckCircle2, Flame, History, X, RefreshCw, ChevronDown, ChevronUp, Cloud, Search, ArrowUpDown } from 'lucide-react';
+import { Check, Minus, Trophy, Star, Zap, Trash2, ListTodo, CheckCircle2, Flame, History, X, RefreshCw, ChevronDown, ChevronUp, Cloud, Search, ArrowUpDown, Settings, Bell, BellOff } from 'lucide-react';
 import { useAutoAnimate } from '@formkit/auto-animate/react';
 import { tasks } from './data';
 import type { Task } from './data';
@@ -29,20 +29,17 @@ interface TaskCardProps {
   onToggleStatus: (id: number) => void;
   hasVip: boolean;
   isX2Server: boolean;
+  hapticsEnabled: boolean;
 }
 
-// --- Enhanced Cloud Storage Helper ---
+// --- Cloud Storage Helper ---
 const isCloudSupported = tgApp?.isVersionAtLeast?.('6.9');
 
 const cloud = {
   set: (key: string, value: any) => new Promise((res) => {
     const val = JSON.stringify(value);
-    if (isCloudSupported) {
-      tgApp.CloudStorage.setItem(key, val, () => res(true));
-    } else {
-      localStorage.setItem(key, val);
-      res(true);
-    }
+    if (isCloudSupported) tgApp.CloudStorage.setItem(key, val, () => res(true));
+    else { localStorage.setItem(key, val); res(true); }
   }),
   get: (key: string) => new Promise<any>((res) => {
     if (isCloudSupported) {
@@ -55,24 +52,17 @@ const cloud = {
     }
   }),
   getKeys: () => new Promise<string[]>((res) => {
-    if (isCloudSupported) {
-      tgApp.CloudStorage.getKeys((_: any, k: string[]) => res(k || []));
-    } else {
-      res(Object.keys(localStorage));
-    }
+    if (isCloudSupported) tgApp.CloudStorage.getKeys((_: any, k: string[]) => res(k || []));
+    else res(Object.keys(localStorage));
   }),
   remove: (keys: string[]) => new Promise((res) => {
-    if (isCloudSupported) {
-      tgApp.CloudStorage.removeItems(keys, () => res(true));
-    } else {
-      keys.forEach(k => localStorage.removeItem(k));
-      res(true);
-    }
+    if (isCloudSupported) tgApp.CloudStorage.removeItems(keys, () => res(true));
+    else { keys.forEach(k => localStorage.removeItem(k)); res(true); }
   })
 };
 
-export const triggerHaptic = (type: 'click' | 'tick' | 'success') => {
-  if (!tgApp?.HapticFeedback) return;
+export const triggerHaptic = (type: 'click' | 'tick' | 'success', enabled: boolean) => {
+  if (!tgApp?.HapticFeedback || !enabled) return;
   try {
     if (type === 'click') tgApp.HapticFeedback.impactOccurred('light');
     if (type === 'tick') tgApp.HapticFeedback.selectionChanged();
@@ -100,22 +90,21 @@ function App() {
   const [history, setHistory] = useState<Record<string, DailyHistory>>({});
   const [hasVip, setHasVip] = useState(false);
   const [isX2Server, setIsX2Server] = useState(false);
+  const [hapticsEnabled, setHapticsEnabled] = useState(true);
   
-  // Real-time synchronization & Search/Sort states
   const [lastLocalUpdate, setLastLocalUpdate] = useState<number>(0);
   const [searchQuery, setSearchQuery] = useState('');
   const [sortBy, setSortBy] = useState<'default' | 'high' | 'low'>('default');
   
+  const [activeTab, setActiveTab] = useState<'tasks' | 'settings'>('tasks');
   const [isResetModalOpen, setIsResetModalOpen] = useState(false);
   const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false);
   const [expandedHistoryDay, setExpandedHistoryDay] = useState<string | null>(null);
   const [recommendationSeed, setRecommendationSeed] = useState(0); 
 
+  const [parent] = useAutoAnimate();
+  const [historyListRef] = useAutoAnimate<HTMLDivElement>();
   const timeoutsRef = useRef<Record<number, ReturnType<typeof setTimeout>>>({});
-  const [pendingListRef] = useAutoAnimate<HTMLDivElement>({ duration: 300, easing: 'ease-out' });
-  const [completedListRef] = useAutoAnimate<HTMLDivElement>({ duration: 300, easing: 'ease-out' });
-  const [recListRef] = useAutoAnimate<HTMLDivElement>({ duration: 300, easing: 'ease-out' });
-  const [historyListRef] = useAutoAnimate<HTMLDivElement>({ duration: 250, easing: 'ease-out' });
 
   const recommendedRef = useRef<HTMLDivElement>(null);
   const pendingRef = useRef<HTMLDivElement>(null);
@@ -149,15 +138,15 @@ function App() {
 
   const refreshDataFromCloud = async () => {
     const currentDay = getCurrentGameDay();
-    const [p, l, d, v, x2, ts, allKeys] = await Promise.all([
+    const [p, l, d, v, x2, hapt, ts, allKeys] = await Promise.all([
       cloud.get('progress'), cloud.get('logs'), cloud.get('gameday'),
-      cloud.get('vip'), cloud.get('x2'), cloud.get('last_update_ts'), cloud.getKeys()
+      cloud.get('vip'), cloud.get('x2'), cloud.get('haptics'), 
+      cloud.get('last_update_ts'), cloud.getKeys()
     ]);
 
-    const initialVip = !!v;
-    const initialX2 = !!x2;
-    setHasVip(initialVip);
-    setIsX2Server(initialX2);
+    setHasVip(!!v);
+    setIsX2Server(!!x2);
+    setHapticsEnabled(hapt !== null ? !!hapt : true);
     if (ts) setLastLocalUpdate(ts);
 
     if (d && d !== currentDay) {
@@ -171,18 +160,13 @@ function App() {
         const isDone = t.type === 'progress' ? val >= t.max : val > 0;
         if (isDone) {
           cCount++;
-          let reward = initialVip ? t.vipBP : t.baseBP;
-          if (initialX2) reward *= 2;
+          let reward = !!v ? t.vipBP : t.baseBP;
+          if (!!x2) reward *= 2;
           finalBP += (t.type === 'repeatable' ? reward * val : reward);
         }
       });
 
       await cloud.set(`hist_${d}`, { bp: finalBP, completedCount: cCount, logs: prevLogs });
-      const ninetyDaysAgo = new Date();
-      ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
-      const oldKeys = allKeys.filter(k => k.startsWith('hist_') && new Date(k.replace('hist_', '')) < ninetyDaysAgo);
-      if (oldKeys.length > 0) await cloud.remove(oldKeys);
-
       setTaskProgress({}); setTodayLogs([]); setCompletedIds(new Set());
       const nowTs = Date.now();
       setLastLocalUpdate(nowTs);
@@ -227,21 +211,9 @@ function App() {
     const nowTs = Date.now();
     setLastLocalUpdate(nowTs);
     await Promise.all([
-      cloud.set('progress', p), 
-      cloud.set('logs', l), 
-      cloud.set('gameday', gameDay),
-      cloud.set('last_update_ts', nowTs)
+      cloud.set('progress', p), cloud.set('logs', l), 
+      cloud.set('gameday', gameDay), cloud.set('last_update_ts', nowTs)
     ]);
-  };
-
-  const logAction = (taskId: number | null, type: 'add' | 'remove' | 'reset', bp: number) => {
-    const newLog: TaskLog = {
-      id: Math.random().toString(36).substring(2, 9),
-      taskId, type, bp, timestamp: Date.now()
-    };
-    const nextLogs = [...todayLogs, newLog];
-    setTodayLogs(nextLogs);
-    return nextLogs;
   };
 
   const updateProgress = async (taskId: number, amount: number, maxAmount: number) => {
@@ -252,28 +224,29 @@ function App() {
     const task = tasks.find(t => t.id === taskId);
     if (!task) return;
 
-    const isNowCompleted = task.type === 'progress' ? nextVal >= task.max : nextVal > 0;
-    const wasCompleted = task.type === 'progress' ? currentVal >= task.max : currentVal > 0;
-
     let reward = hasVip ? task.vipBP : task.baseBP;
     if (isX2Server) reward *= 2;
 
-    let updatedLogs = todayLogs;
+    const newLog: TaskLog = {
+      id: Math.random().toString(36).substring(2, 9),
+      taskId, type: amount > 0 ? 'add' : 'remove', bp: task.type === 'repeatable' ? reward * Math.abs(amount) : reward, timestamp: Date.now()
+    };
+
+    const isNowCompleted = task.type === 'progress' ? nextVal >= task.max : nextVal > 0;
+    const wasCompleted = task.type === 'progress' ? currentVal >= task.max : currentVal > 0;
+
     if (isNowCompleted && !wasCompleted) {
-      updatedLogs = logAction(taskId, 'add', reward);
       timeoutsRef.current[taskId] = setTimeout(() => setCompletedIds(prev => new Set(prev).add(taskId)), 400);
     } else if (!isNowCompleted && wasCompleted) {
-      updatedLogs = logAction(taskId, 'remove', reward);
       if (timeoutsRef.current[taskId]) clearTimeout(timeoutsRef.current[taskId]);
       setCompletedIds(prev => { const next = new Set(prev); next.delete(taskId); return next; });
-    } else if (task.type === 'repeatable') {
-      const bpDelta = reward * Math.abs(amount);
-      updatedLogs = logAction(taskId, amount > 0 ? 'add' : 'remove', bpDelta);
     }
 
+    const nextLogs = [...todayLogs, newLog];
     const nextProgress = { ...taskProgress, [taskId]: nextVal };
+    setTodayLogs(nextLogs);
     setTaskProgress(nextProgress);
-    await sync(nextProgress, updatedLogs);
+    await sync(nextProgress, nextLogs);
   };
 
   const toggleTaskStatus = async (taskId: number) => {
@@ -282,27 +255,20 @@ function App() {
   };
 
   const resetAllProgress = async () => {
-    triggerHaptic('success');
-    Object.values(timeoutsRef.current).forEach(clearTimeout);
-    timeoutsRef.current = {};
-    const updatedLogs = logAction(null, 'reset', 0);
+    triggerHaptic('success', hapticsEnabled);
+    const resetLog: TaskLog = { id: 'reset-' + Date.now(), taskId: null, type: 'reset', bp: 0, timestamp: Date.now() };
+    const nextLogs = [...todayLogs, resetLog];
     setTaskProgress({});
     setCompletedIds(new Set());
-    await sync({}, updatedLogs);
+    setTodayLogs(nextLogs);
+    await sync({}, nextLogs);
     setIsResetModalOpen(false);
   };
 
-  // --- Filtering & Sorting Logic ---
   const processTasks = (taskList: Task[]) => {
-    let filtered = taskList.filter(t => 
-      t.title.toLowerCase().includes(searchQuery.toLowerCase())
-    );
-
-    if (sortBy === 'high') {
-      filtered.sort((a, b) => (hasVip ? b.vipBP : b.baseBP) - (hasVip ? a.vipBP : a.baseBP));
-    } else if (sortBy === 'low') {
-      filtered.sort((a, b) => (hasVip ? a.vipBP : a.baseBP) - (hasVip ? b.vipBP : b.baseBP));
-    }
+    let filtered = taskList.filter(t => t.title.toLowerCase().includes(searchQuery.toLowerCase()));
+    if (sortBy === 'high') filtered.sort((a, b) => (hasVip ? b.vipBP : b.baseBP) - (hasVip ? a.vipBP : a.baseBP));
+    else if (sortBy === 'low') filtered.sort((a, b) => (hasVip ? a.vipBP : a.baseBP) - (hasVip ? b.vipBP : b.baseBP));
     return filtered;
   };
 
@@ -313,19 +279,14 @@ function App() {
       if (completedIds.has(task.id)) completed.push(task);
       else pending.push(task);
     });
-    return { 
-      pendingTasks: processTasks(pending), 
-      completedTasks: processTasks(completed) 
-    };
+    return { pendingTasks: processTasks(pending), completedTasks: processTasks(completed) };
   }, [completedIds, searchQuery, sortBy, hasVip]);
 
   const recommendedTasks = useMemo(() => {
     const activeCategories = new Set<string>();
     completedTasks.forEach(t => { if (t.category) activeCategories.add(t.category); });
     let pool = [...pendingTasks].sort(() => Math.random() - 0.5);
-    const contextMatched = pool.filter(t => activeCategories.has(t.category));
-    const unrelated = pool.filter(t => !activeCategories.has(t.category));
-    return [...contextMatched, ...unrelated].slice(0, 3);
+    return [...pool.filter(t => activeCategories.has(t.category)), ...pool.filter(t => !activeCategories.has(t.category))].slice(0, 3);
   }, [pendingTasks, completedTasks, recommendationSeed]);
 
   if (isLoading) return (
@@ -336,8 +297,7 @@ function App() {
   );
 
   return (
-    <div className="min-h-screen bg-rpDark pb-24 font-sans select-none">
-      {/* FIXED HEADER */}
+    <div className="min-h-screen bg-rpDark pb-24 font-sans select-none overflow-x-hidden">
       <div className="fixed top-0 left-0 right-0 z-40 bg-rpDark/85 backdrop-blur-xl border-b border-gray-800 p-4 shadow-xl">
         <div className="flex justify-between items-center mb-3">
           <h1 className="text-xl font-bold text-transparent bg-clip-text bg-rp-gradient flex items-center gap-2">
@@ -345,7 +305,7 @@ function App() {
             BP Tracker <Cloud size={14} className={`${isSyncing ? 'text-blue-400 animate-bounce' : 'text-blue-400 opacity-50'}`} />
           </h1>
           <div className="flex items-center gap-3">
-            <button onClick={() => { triggerHaptic('click'); setIsHistoryModalOpen(true); }} className="w-10 h-10 rounded-full bg-gray-800 flex items-center justify-center text-gray-400 border border-gray-700 active:scale-90 transition-transform"><History size={18} /></button>
+            <button onClick={() => { triggerHaptic('click', hapticsEnabled); setIsHistoryModalOpen(true); }} className="w-10 h-10 rounded-full bg-gray-800 flex items-center justify-center text-gray-400 border border-gray-700 active:scale-90 transition-transform"><History size={18} /></button>
             <div className="text-right">
               <div className="text-[10px] text-gray-400 font-semibold uppercase tracking-wider">Заработано</div>
               <div className="text-2xl leading-none font-black text-white">{calculateTotalBP()} <span className="text-orange-400 text-sm">BP</span></div>
@@ -353,84 +313,118 @@ function App() {
           </div>
         </div>
 
-        <div className="flex gap-2 mb-3">
-          <button onClick={async () => { triggerHaptic('click'); const v = !hasVip; setHasVip(v); await cloud.set('vip', v); await cloud.set('last_update_ts', Date.now()); setLastLocalUpdate(Date.now()); }} className={`flex-1 py-1.5 px-3 rounded-lg text-sm font-bold transition-all duration-300 ${hasVip ? 'bg-rp-gradient text-rpDark shadow-[0_0_10px_rgba(249,115,22,0.3)]' : 'bg-gray-800 text-gray-400'}`}><Star size={14} className="inline mr-1" /> VIP</button>
-          <button onClick={async () => { triggerHaptic('click'); const x = !isX2Server; setIsX2Server(x); await cloud.set('x2', x); await cloud.set('last_update_ts', Date.now()); setLastLocalUpdate(Date.now()); }} className={`flex-1 py-1.5 px-3 rounded-lg text-sm font-bold transition-all duration-300 ${isX2Server ? 'bg-rp-gradient text-rpDark shadow-[0_0_10px_rgba(249,115,22,0.3)]' : 'bg-gray-800 text-gray-400'}`}><Zap size={14} className="inline mr-1" /> Сервер x2</button>
-        </div>
+        {activeTab === 'tasks' && (
+          <div className="animate-in fade-in duration-300">
+            <div className="flex gap-2 mb-3">
+              <button onClick={async () => { triggerHaptic('click', hapticsEnabled); const v = !hasVip; setHasVip(v); await cloud.set('vip', v); setLastLocalUpdate(Date.now()); }} className={`flex-1 py-1.5 px-3 rounded-lg text-sm font-bold transition-all duration-300 ${hasVip ? 'bg-rp-gradient text-rpDark shadow-[0_0_10px_rgba(249,115,22,0.3)]' : 'bg-gray-800 text-gray-400'}`}><Star size={14} className="inline mr-1" /> VIP</button>
+              <button onClick={async () => { triggerHaptic('click', hapticsEnabled); const x = !isX2Server; setIsX2Server(x); await cloud.set('x2', x); setLastLocalUpdate(Date.now()); }} className={`flex-1 py-1.5 px-3 rounded-lg text-sm font-bold transition-all duration-300 ${isX2Server ? 'bg-rp-gradient text-rpDark shadow-[0_0_10px_rgba(249,115,22,0.3)]' : 'bg-gray-800 text-gray-400'}`}><Zap size={14} className="inline mr-1" /> Сервер x2</button>
+            </div>
+            <div className="flex gap-2">
+              <div className="relative flex-1">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" size={16} />
+                <input type="text" placeholder="Поиск..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} className="w-full bg-gray-900 border border-gray-800 rounded-lg py-2 pl-10 pr-4 text-sm text-white focus:outline-none focus:border-orange-500/50" />
+              </div>
+              <button onClick={() => { triggerHaptic('click', hapticsEnabled); setSortBy(prev => prev === 'default' ? 'high' : prev === 'high' ? 'low' : 'default'); }} className={`px-3 rounded-lg border flex items-center gap-2 text-xs font-bold transition-all ${sortBy !== 'default' ? 'bg-orange-500/10 border-orange-500/50 text-orange-400' : 'bg-gray-900 border-gray-800 text-gray-400'}`}><ArrowUpDown size={14} /></button>
+            </div>
+          </div>
+        )}
 
-        {/* SEARCH & SORT BAR */}
-        <div className="flex gap-2">
-          <div className="relative flex-1">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" size={16} />
-            <input 
-              type="text" 
-              placeholder="Поиск заданий..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full bg-gray-900 border border-gray-800 rounded-lg py-2 pl-10 pr-4 text-sm text-white placeholder:text-gray-600 focus:outline-none focus:border-orange-500/50 transition-colors"
-            />
-            {searchQuery && (
-              <button onClick={() => setSearchQuery('')} className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-gray-500 hover:text-white">
-                <X size={14} />
-              </button>
+        {activeTab === 'settings' && (
+          <div className="py-2 animate-in slide-in-from-right-4 duration-300">
+            <h2 className="text-sm font-bold text-gray-400 uppercase tracking-widest">Настройки</h2>
+          </div>
+        )}
+      </div>
+
+      {/* MAIN CONTENT AREA */}
+      <div className="p-4 pt-[180px]" ref={parent}>
+        {activeTab === 'tasks' ? (
+          <div className="space-y-8">
+            {recommendedTasks.length > 0 && !searchQuery && (
+              <div ref={recommendedRef} className="scroll-mt-48">
+                <div className="flex justify-between items-center mb-3 px-1">
+                  <h2 className="text-sm font-bold uppercase tracking-widest text-orange-400 flex items-center gap-2"><Flame size={16} /> Рекомендуем</h2>
+                  <button onClick={() => { triggerHaptic('click', hapticsEnabled); setRecommendationSeed(s => s + 1); }} className="text-gray-400 p-1.5 rounded-full bg-gray-800 active:scale-90 transition-transform"><RefreshCw size={14} /></button>
+                </div>
+                <div className="space-y-2">
+                  {recommendedTasks.map(t => <TaskCard key={`rec-${t.id}`} task={t} globalProgress={taskProgress[t.id] || 0} onProgressUpdate={updateProgress} onToggleStatus={toggleTaskStatus} hasVip={hasVip} isX2Server={isX2Server} hapticsEnabled={hapticsEnabled} />)}
+                </div>
+              </div>
+            )}
+            <div ref={pendingRef} className="scroll-mt-48">
+              <h2 className="text-sm font-bold uppercase mb-3 text-white flex items-center gap-2 px-1"><ListTodo size={16} className="text-gray-400" /> {searchQuery ? 'Результаты' : 'Задания'} ({pendingTasks.length})</h2>
+              <div className="space-y-2">
+                {pendingTasks.map(t => <TaskCard key={t.id} task={t} globalProgress={taskProgress[t.id] || 0} onProgressUpdate={updateProgress} onToggleStatus={toggleTaskStatus} hasVip={hasVip} isX2Server={isX2Server} hapticsEnabled={hapticsEnabled} />)}
+              </div>
+            </div>
+            {completedTasks.length > 0 && (
+              <div ref={completedRef} className="scroll-mt-48">
+                <h2 className="text-sm font-bold uppercase mb-3 text-green-500 flex items-center gap-2 px-1"><CheckCircle2 size={16} /> Выполнено ({completedTasks.length})</h2>
+                <div className="space-y-2 opacity-75 transition-opacity hover:opacity-100">
+                  {completedTasks.map(t => <TaskCard key={t.id} task={t} globalProgress={taskProgress[t.id] || 0} onProgressUpdate={updateProgress} onToggleStatus={toggleTaskStatus} hasVip={hasVip} isX2Server={isX2Server} hapticsEnabled={hapticsEnabled} />)}
+                </div>
+              </div>
             )}
           </div>
-          <button 
-            onClick={() => {
-              triggerHaptic('click');
-              setSortBy(prev => prev === 'default' ? 'high' : prev === 'high' ? 'low' : 'default');
-            }}
-            className={`px-3 rounded-lg border flex items-center gap-2 text-xs font-bold transition-all ${sortBy !== 'default' ? 'bg-orange-500/10 border-orange-500/50 text-orange-400' : 'bg-gray-900 border-gray-800 text-gray-400'}`}
-          >
-            <ArrowUpDown size={14} />
-            {sortBy === 'high' ? 'Много BP' : sortBy === 'low' ? 'Мало BP' : 'Сорт.'}
-          </button>
-        </div>
+        ) : (
+          <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-300">
+            <div className="bg-rpPanel rounded-2xl p-4 border border-gray-800 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${hapticsEnabled ? 'bg-orange-500/20 text-orange-400' : 'bg-gray-800 text-gray-500'}`}>
+                  {hapticsEnabled ? <Bell size={20} /> : <BellOff size={20} />}
+                </div>
+                <div>
+                  <h3 className="font-bold text-white text-sm">Вибрация</h3>
+                  <p className="text-xs text-gray-500">Тактильный отклик при кликах</p>
+                </div>
+              </div>
+              <button 
+                onClick={async () => {
+                  const newState = !hapticsEnabled;
+                  setHapticsEnabled(newState);
+                  if (newState) triggerHaptic('click', true);
+                  await cloud.set('haptics', newState);
+                }}
+                className={`w-12 h-6 rounded-full transition-colors relative ${hapticsEnabled ? 'bg-orange-500' : 'bg-gray-700'}`}
+              >
+                <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${hapticsEnabled ? 'left-7' : 'left-1'}`} />
+              </button>
+            </div>
+
+            <div className="bg-rpPanel rounded-2xl p-4 border border-gray-800">
+              <h3 className="font-bold text-white text-sm mb-1">Опасная зона</h3>
+              <p className="text-xs text-gray-500 mb-4">Сброс обнулит текущий прогресс без сохранения в историю.</p>
+              <button 
+                onClick={() => { triggerHaptic('click', hapticsEnabled); setIsResetModalOpen(true); }}
+                className="w-full py-3 bg-red-500/10 border border-red-500/30 text-red-500 rounded-xl font-bold text-sm flex items-center justify-center gap-2 active:bg-red-500 active:text-white transition-all"
+              >
+                <Trash2 size={16} /> Сбросить прогресс дня
+              </button>
+            </div>
+
+            <div className="text-center space-y-1 pt-4">
+              <p className="text-[10px] text-gray-600 font-bold uppercase tracking-widest">GTA5RP BP Tracker v2.2</p>
+              <p className="text-[10px] text-gray-700 flex items-center justify-center gap-1">
+                <Cloud size={10} /> {isCloudSupported ? 'Cloud Storage Active' : 'Local Backup Active'}
+              </p>
+            </div>
+          </div>
+        )}
       </div>
 
-      <div className="p-4 pt-48 space-y-8">
-        {recommendedTasks.length > 0 && !searchQuery && (
-          <div ref={recommendedRef} className="scroll-mt-48">
-            <div className="flex justify-between items-center mb-3 px-1">
-              <h2 className="text-sm font-bold uppercase tracking-widest text-orange-400 flex items-center gap-2"><Flame size={16} /> Рекомендуем</h2>
-              <button onClick={() => { triggerHaptic('click'); setRecommendationSeed(s => s + 1); }} className="text-gray-400 p-1.5 rounded-full bg-gray-800 active:scale-90 transition-transform"><RefreshCw size={14} /></button>
-            </div>
-            <div ref={recListRef} className="space-y-2">
-              {recommendedTasks.map(t => <TaskCard key={`rec-${t.id}`} task={t} globalProgress={taskProgress[t.id] || 0} onProgressUpdate={updateProgress} onToggleStatus={toggleTaskStatus} hasVip={hasVip} isX2Server={isX2Server} />)}
-            </div>
-          </div>
-        )}
-        <div ref={pendingRef} className="scroll-mt-48">
-          <h2 className="text-sm font-bold uppercase mb-3 text-white flex items-center gap-2 px-1"><ListTodo size={16} className="text-gray-400" /> {searchQuery ? 'Результаты поиска' : 'Текущие'} ({pendingTasks.length})</h2>
-          <div ref={pendingListRef} className="space-y-2">
-            {pendingTasks.map(t => <TaskCard key={t.id} task={t} globalProgress={taskProgress[t.id] || 0} onProgressUpdate={updateProgress} onToggleStatus={toggleTaskStatus} hasVip={hasVip} isX2Server={isX2Server} />)}
-          </div>
-        </div>
-        {completedTasks.length > 0 && (
-          <div ref={completedRef} className="scroll-mt-48">
-            <h2 className="text-sm font-bold uppercase mb-3 text-green-500 flex items-center gap-2 px-1"><CheckCircle2 size={16} /> Выполнено ({completedTasks.length})</h2>
-            <div ref={completedListRef} className="space-y-2 opacity-75">
-              {completedTasks.map(t => <TaskCard key={t.id} task={t} globalProgress={taskProgress[t.id] || 0} onProgressUpdate={updateProgress} onToggleStatus={toggleTaskStatus} hasVip={hasVip} isX2Server={isX2Server} />)}
-            </div>
-          </div>
-        )}
-        {pendingTasks.length === 0 && completedTasks.length === 0 && (
-          <div className="text-center py-20">
-            <Search className="mx-auto text-gray-800 mb-4" size={48} />
-            <p className="text-gray-500 font-medium">Ничего не найдено...</p>
-          </div>
-        )}
-      </div>
-
-      {/* FOOTER & MODALS stay the same as previous stable version */}
+      {/* FOOTER NAV */}
       <div className="fixed bottom-0 left-0 right-0 bg-rpPanel border-t border-gray-800 flex justify-around p-2 pb-safe z-50 shadow-[0_-10px_20px_rgba(0,0,0,0.5)]">
-        <button onClick={() => recommendedRef.current?.scrollIntoView({ behavior: 'smooth' })} className="flex flex-col items-center p-2 text-gray-400 active:text-orange-400"><Flame size={20} /><span className="text-[10px] mt-1">Топ</span></button>
-        <button onClick={() => pendingRef.current?.scrollIntoView({ behavior: 'smooth' })} className="flex flex-col items-center p-2 text-gray-400 active:text-white"><ListTodo size={20} /><span className="text-[10px] mt-1">Задания</span></button>
-        <button onClick={() => completedRef.current?.scrollIntoView({ behavior: 'smooth' })} className="flex flex-col items-center p-2 text-gray-400 active:text-green-500"><CheckCircle2 size={20} /><span className="text-[10px] mt-1">Готово</span></button>
-        <div className="w-px h-8 bg-gray-700 self-center" />
-        <button onClick={() => setIsResetModalOpen(true)} className="flex flex-col items-center p-2 text-gray-500 active:text-red-400"><Trash2 size={20} /><span className="text-[10px] mt-1">Сброс</span></button>
+        <button onClick={() => { triggerHaptic('click', hapticsEnabled); setActiveTab('tasks'); }} className={`flex-1 flex flex-col items-center p-2 transition-colors ${activeTab === 'tasks' ? 'text-orange-400' : 'text-gray-500'}`}>
+          <ListTodo size={22} />
+          <span className="text-[10px] mt-1 font-bold">Задания</span>
+        </button>
+        <button onClick={() => { triggerHaptic('click', hapticsEnabled); setActiveTab('settings'); }} className={`flex-1 flex flex-col items-center p-2 transition-colors ${activeTab === 'settings' ? 'text-orange-400' : 'text-gray-500'}`}>
+          <Settings size={22} />
+          <span className="text-[10px] mt-1 font-bold">Настройки</span>
+        </button>
       </div>
 
+      {/* MODALS */}
       {isHistoryModalOpen && (
         <div className="fixed inset-0 z-[100] bg-rpDark flex flex-col overflow-hidden animate-in slide-in-from-bottom-full duration-300">
           <div className="p-4 bg-rpPanel border-b border-gray-800 flex justify-between items-center shrink-0 pt-safe">
@@ -451,7 +445,7 @@ function App() {
                   </div>
                   {isExpanded && hasActivity && (
                     <div className="bg-black/30 p-3 border-t border-gray-800/50 space-y-2">
-                      {dayData.logs.slice().reverse().map((log) => (
+                      {dayData.logs.slice().reverse().map((log: any) => (
                         <div key={log.id} className={`flex justify-between text-xs ${log.type === 'reset' ? 'bg-red-500/10 p-1 rounded text-red-400 text-center block w-full' : log.type === 'add' ? 'text-gray-200' : 'text-gray-500 line-through'}`}>
                           {log.type === 'reset' ? 'СБРОС ПРОГРЕССА' : (
                             <><span>{tasks.find(t => t.id === log.taskId)?.title}</span><span className={log.type === 'add' ? 'text-green-400' : 'text-red-400'}>{log.type === 'add' ? '+' : '-'}{log.bp} BP</span></>
@@ -469,8 +463,9 @@ function App() {
 
       {isResetModalOpen && (
         <div className="fixed inset-0 z-[110] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-rpPanel border border-gray-800 rounded-2xl p-6 w-full max-w-sm shadow-2xl">
+          <div className="bg-rpPanel border border-gray-800 rounded-2xl p-6 w-full max-w-sm">
             <h3 className="text-xl font-bold text-white mb-2">Сбросить всё?</h3>
+            <p className="text-xs text-gray-400 mb-6">Это действие обнулит текущий день. Оно будет записано в историю як сброс.</p>
             <div className="flex gap-3 mt-6">
               <button onClick={() => setIsResetModalOpen(false)} className="flex-1 py-3 rounded-xl bg-gray-800 text-white font-bold">Отмена</button>
               <button onClick={resetAllProgress} className="flex-1 py-3 rounded-xl bg-red-500/20 text-red-500 border border-red-500/50 font-bold">Да, сбросить</button>
@@ -482,7 +477,7 @@ function App() {
   );
 }
 
-function TaskCard({ task, globalProgress, onProgressUpdate, onToggleStatus, hasVip, isX2Server }: TaskCardProps) {
+function TaskCard({ task, globalProgress, onProgressUpdate, onToggleStatus, hasVip, isX2Server, hapticsEnabled }: TaskCardProps) {
   const [localProgress, setLocalProgress] = useState(globalProgress);
   const [isDragging, setIsDragging] = useState(false);
   const displayProgress = isDragging ? localProgress : globalProgress;
@@ -511,7 +506,7 @@ function TaskCard({ task, globalProgress, onProgressUpdate, onToggleStatus, hasV
       const cardWidth = e.currentTarget.getBoundingClientRect().width;
       const progressDelta = Math.floor((deltaX / cardWidth) * (task.type === 'repeatable' ? 10 : task.max));
       let newProgress = Math.max(0, Math.min(task.type === 'repeatable' ? 999 : task.max, startProgress.current + progressDelta));
-      if (newProgress !== localProgress) { setLocalProgress(newProgress); triggerHaptic('tick'); }
+      if (newProgress !== localProgress) { setLocalProgress(newProgress); triggerHaptic('tick', hapticsEnabled); }
     }
   };
 
@@ -522,10 +517,10 @@ function TaskCard({ task, globalProgress, onProgressUpdate, onToggleStatus, hasV
       setIsDragging(false); const amountToAdd = localProgress - globalProgress;
       if (amountToAdd !== 0) {
         onProgressUpdate(task.id, amountToAdd, task.type === 'repeatable' ? 999 : task.max);
-        if (localProgress >= task.max && globalProgress < task.max) triggerHaptic('success');
+        if (localProgress >= task.max && globalProgress < task.max) triggerHaptic('success', hapticsEnabled);
       }
     } else {
-      triggerHaptic('click');
+      triggerHaptic('click', hapticsEnabled);
       if (task.type === 'boolean') onToggleStatus(task.id);
       else onProgressUpdate(task.id, 1, task.type === 'repeatable' ? 999 : task.max);
     }
@@ -543,7 +538,7 @@ function TaskCard({ task, globalProgress, onProgressUpdate, onToggleStatus, hasV
         </div>
         <div className="flex items-center gap-3 pointer-events-auto">
           {(task.type === 'progress' || task.type === 'repeatable') && globalProgress > 0 && (
-            <button onPointerDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); triggerHaptic('click'); onProgressUpdate(task.id, -1, task.max); }} className="w-9 h-9 rounded-lg bg-black/40 text-gray-400 flex items-center justify-center border border-gray-700/50"><Minus size={18} /></button>
+            <button onPointerDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); triggerHaptic('click', hapticsEnabled); onProgressUpdate(task.id, -1, task.max); }} className="w-9 h-9 rounded-lg bg-black/40 text-gray-400 flex items-center justify-center border border-gray-700/50"><Minus size={18} /></button>
           )}
           <div className="min-w-[44px] flex justify-end items-center">
             {task.type === 'boolean' ? (
